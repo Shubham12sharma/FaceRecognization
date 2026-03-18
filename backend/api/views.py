@@ -442,68 +442,113 @@ class AttendanceViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def recognize_face(request):
-    image_data = request.data.get('image')
-    threshold = request.data.get('threshold', 80)
-    
-    if not image_data:
-        return Response({'error': 'No image provided'}, 
-                       status=status.HTTP_400_BAD_REQUEST)
-    
-    # Save image temporarily
-    temp_path = save_base64_image(image_data)
-    
+    """Recognize face from uploaded image"""
     try:
-        # Perform recognition
-        result = face_recognizer.recognize(temp_path, threshold)
+        image_data = request.data.get('image')
+        threshold = request.data.get('threshold', 80)
         
-        # Log the recognition attempt
-        RecognitionLog.objects.create(
-            student_id=result['student_id'] if result['recognized'] else None,
-            confidence=result['confidence'],
-            recognized=result['recognized'],
-            image=temp_path
-        )
+        if not image_data:
+            return Response({
+                'recognized': False,
+                'error': 'No image provided'
+            }, status=status.HTTP_400_BAD_REQUEST)
         
-        # If recognized, mark attendance
-        if result['recognized'] and result['student_id']:
+        # Check if model exists and is trained
+        model_path = settings.FACE_RECOGNITION['CLASSIFIER_PATH']
+        if not os.path.exists(model_path):
+            return Response({
+                'recognized': False,
+                'error': 'Model not trained yet. Please train the model first.',
+                'message': 'Model not trained'
+            }, status=status.HTTP_200_OK)  # Return 200 but with recognized=False
+        
+        # Save image temporarily
+        temp_path = save_base64_image(image_data)
+        
+        try:
+            # Perform recognition
+            result = face_recognizer.recognize(temp_path, threshold)
+            
+            # Log the recognition attempt
             try:
-                student = Student.objects.get(student_id=result['student_id'])
+                student = None
+                if result['recognized'] and result['student_id']:
+                    # Try to find student by student_id (which is the folder name)
+                    student_name = result['student_id'].replace('_', ' ').title()
+                    # You might need to adjust this based on how you store student IDs
+                    student = Student.objects.filter(name__icontains=student_name).first()
                 
-                attendance, created = Attendance.objects.get_or_create(
+                RecognitionLog.objects.create(
                     student=student,
-                    date=date.today(),
-                    defaults={
-                        'status': 'present',
-                        'confidence': result['confidence'],
-                        'recognized_by': request.user
-                    }
+                    confidence=result['confidence'],
+                    recognized=result['recognized'],
+                    image=temp_path
                 )
-                
-                if not created and attendance.status == 'absent':
-                    attendance.status = 'present'
-                    attendance.confidence = result['confidence']
-                    attendance.save()
-                
-                result['student'] = {
-                    'id': student.id,
-                    'name': student.name,
-                    'roll_no': student.roll_no,
-                    'department': student.department.name if student.department else None
-                }
-            except Student.DoesNotExist:
-                pass
+            except Exception as log_error:
+                print(f"Error logging recognition: {log_error}")
+            
+            # If recognized, mark attendance
+            if result['recognized'] and result['student_id']:
+                try:
+                    # Try to find student by name or create a record
+                    student_name = result['student_id'].replace('_', ' ').title()
+                    student = Student.objects.filter(name__icontains=student_name).first()
+                    
+                    if student:
+                        attendance, created = Attendance.objects.get_or_create(
+                            student=student,
+                            date=date.today(),
+                            defaults={
+                                'status': 'present',
+                                'confidence': result['confidence'],
+                                'recognized_by': request.user
+                            }
+                        )
+                        
+                        if not created and attendance.status == 'absent':
+                            attendance.status = 'present'
+                            attendance.confidence = result['confidence']
+                            attendance.save()
+                        
+                        result['student'] = {
+                            'id': student.id,
+                            'student_id': student.student_id,
+                            'name': student.name,
+                            'roll_no': student.roll_no,
+                            'department': student.department.name if student.department else None,
+                            'department_name': student.department.name if student.department else None,
+                            'photo': request.build_absolute_uri(student.photo.url) if student.photo else None
+                        }
+                except Exception as att_error:
+                    print(f"Error marking attendance: {att_error}")
+            
+            return Response(result)
         
-        return Response(result)
+        except Exception as e:
+            print(f"Recognition error: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return Response({
+                'recognized': False,
+                'error': str(e),
+                'message': 'Recognition failed'
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        finally:
+            # Clean up temp file
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
     
     except Exception as e:
-        return Response({'error': str(e)}, 
-                       status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        print(f"General error in recognize_face: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return Response({
+            'recognized': False,
+            'error': str(e),
+            'message': 'Server error'
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    finally:
-        # Clean up temp file
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
 # Training Views
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -762,6 +807,21 @@ def get_departments(request):
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
+def get_courses(request):
+    """Get all courses, optionally filtered by department"""
+    try:
+        department_id = request.query_params.get('department')
+        if department_id:
+            courses = Course.objects.filter(department_id=department_id).order_by('name')
+        else:
+            courses = Course.objects.all().order_by('name')
+        serializer = CourseSerializer(courses, many=True)
+        return Response(serializer.data)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def export_attendance_csv(request):
     """Export attendance data as CSV"""
     import csv
@@ -803,3 +863,120 @@ def export_attendance_csv(request):
         ])
     
     return response
+
+# In your backend/api/views.py
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_staff(request):
+    """Get all staff users (non-superuser staff accounts)"""
+    try:
+        # Get users who are staff but not superuser
+        staff_users = User.objects.filter(is_staff=True, is_superuser=False)
+        
+        # Also include regular users who might be staff
+        # You can adjust this based on your user model
+        staff_data = []
+        for user in staff_users:
+            staff_data.append({
+                'id': user.id,
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'full_name': f"{user.first_name} {user.last_name}".strip(),
+                'is_staff': user.is_staff,
+                'date_joined': user.date_joined
+            })
+        
+        return Response(staff_data)
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def export_model(request):
+    """Export the trained model file"""
+    model_path = settings.FACE_RECOGNITION['CLASSIFIER_PATH']
+    
+    if not os.path.exists(model_path):
+        return Response({'error': 'No model found'}, status=status.HTTP_404_NOT_FOUND)
+    
+    try:
+        response = FileResponse(
+            open(model_path, 'rb'),
+            as_attachment=True,
+            filename=f'face_recognition_model_{datetime.now().strftime("%Y%m%d")}.xml'
+        )
+        return response
+    except Exception as e:
+        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_face_images(request, person_id):
+    """Upload face images for a student/staff"""
+    try:
+        files = request.FILES.getlist('photos')
+        
+        if not files:
+            return Response({'error': 'No files uploaded'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Try to find as student first
+        from .models import Student
+        try:
+            student = Student.objects.get(student_id=person_id)
+            person_dir = f"{student.student_id}_{student.name.replace(' ', '_')}"
+            person_name = student.name
+        except Student.DoesNotExist:
+            # Try as staff (User)
+            try:
+                staff = User.objects.get(id=person_id)
+                person_dir = f"staff_{staff.id}_{staff.username}"
+                person_name = staff.get_full_name() or staff.username
+            except User.DoesNotExist:
+                return Response({'error': 'Person not found'}, status=status.HTTP_404_NOT_FOUND)
+        
+        # Create directory
+        data_path = settings.FACE_RECOGNITION['DATA_PATH']
+        person_path = os.path.join(data_path, person_dir)
+        os.makedirs(person_path, exist_ok=True)
+        
+        # Save files
+        saved_files = []
+        for i, file in enumerate(files):
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"face_{timestamp}_{i:03d}.jpg"
+            file_path = os.path.join(person_path, filename)
+            
+            with open(file_path, 'wb+') as destination:
+                for chunk in file.chunks():
+                    destination.write(chunk)
+            saved_files.append(filename)
+        
+        return Response({
+            'success': True,
+            'message': f'Successfully uploaded {len(saved_files)} images for {person_name}',
+            'files': saved_files,
+            'person': person_name,
+            'directory': person_dir
+        })
+        
+    except Exception as e:
+        return Response({
+            'success': False,
+            'error': str(e)
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def check_model_exists(request):
+    """Check if a trained model exists"""
+    model_path = settings.FACE_RECOGNITION['CLASSIFIER_PATH']
+    exists = os.path.exists(model_path)
+    
+    return Response({
+        'exists': exists,
+        'path': model_path if exists else None
+    })

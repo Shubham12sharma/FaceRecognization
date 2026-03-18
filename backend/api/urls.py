@@ -7,13 +7,12 @@ router.register(r'students', views.StudentViewSet)
 router.register(r'attendance', views.AttendanceViewSet)
 
 urlpatterns = [
-    # Auth (remove token endpoints from here since they're in main urls.py)
+    # Auth
     path('login/', views.login_view, name='login'),
     path('register/', views.register_view, name='register'),
     path('logout/', views.logout_view, name='logout'),
     path('profile/', views.get_user_profile, name='profile'),
     path('change-password/', views.change_password, name='change_password'),
-    path('attendance/export/', views.export_attendance, name='export_attendance'),
     
     # Dashboard
     path('dashboard/stats/', views.get_dashboard_stats, name='dashboard_stats'),
@@ -21,11 +20,12 @@ urlpatterns = [
     path('dashboard/department-distribution/', views.get_department_distribution, name='department_distribution'),
     path('dashboard/recent-activity/', views.get_recent_activity, name='recent_activity'),
     
+    # Departments and Courses
+    path('departments/', views.get_departments, name='departments'),
+    path('courses/', views.get_courses, name='courses'),
+    
     # Recognition
     path('recognize/', views.recognize_face, name='recognize'),
-
-    path('departments/', views.get_departments, name='departments'),
-    path('attendance/export/csv/', views.export_attendance_csv, name='export_attendance_csv'),
     
     # Training
     path('train/', views.train_model, name='train'),
@@ -33,6 +33,13 @@ urlpatterns = [
     path('dataset/stats/', views.get_dataset_stats, name='dataset_stats'),
     path('training/history/', views.get_training_history, name='training_history'),
     path('model/export/', views.export_model, name='export_model'),
+    path('model/check/', views.check_model_exists, name='check_model'),
+    
+    # Face upload
+    path('upload-face-images/<str:person_id>/', views.upload_face_images, name='upload_face_images'),
+    
+    # Staff
+    path('staff/', views.get_staff, name='staff'),
     
     # Notifications
     path('notifications/', views.get_notifications, name='notifications'),
